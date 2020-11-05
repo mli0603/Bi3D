@@ -22,6 +22,7 @@ import torch.nn.functional as F
 from natsort import natsorted
 from src.read_pfm import readPFM
 import math
+from tifffile import imread
 
 model_names = sorted(name for name in models.__dict__ if name.islower() and not name.startswith("__"))
 
@@ -48,6 +49,7 @@ parser.add_argument("--disp_range_max", type=int)
 parser.add_argument("--dataset", type=str)
 parser.add_argument("--data_path", type=str)
 parser.add_argument("--threshold", type=int, default=3)
+parser.add_argument('--within_max_disp', action='store_true')
 
 args, unknown = parser.parse_known_args()
 
@@ -121,6 +123,14 @@ def main():
         disp_data = natsorted(disp_data)
         occ_data = natsorted(occ_data)
 
+    elif args.dataset == 'scared':
+        file_path = args.data_path
+        left_data = natsorted(
+            [os.path.join(file_path, 'left/', img) for img in os.listdir(os.path.join(file_path, 'left'))])
+        right_data = [img.replace('left/', 'right/') for img in left_data]
+        disp_data = [img.replace('left/', 'disparity/').replace('.png', '.tiff') for img in left_data]
+        occ_data = [img.replace('left/', 'occlusion/') for img in left_data]
+
     avg_error = 0.0
     avg_wrong = 0.0
     avg_total = 0.0
@@ -140,12 +150,14 @@ def main():
             disp_left, _ = readPFM(disp_data[idx])
         elif args.dataset == 'kitti2015':
             disp_left = np.array(Image.open(disp_data[idx])).astype(np.float) / 256.
+        elif args.dataset == 'scared':
+            disp_left = imread(disp_data[idx]).squeeze(0)
 
         # occ
         if occ_data is not None:
             if args.dataset == 'sceneflow':
                 occ = np.array(Image.open(occ_data[idx])).astype(np.bool)
-            elif args.dataset == 'middlebury':
+            elif args.dataset == 'middlebury' or args.dataset == 'scared':
                 occ = np.array(Image.open(occ_data[idx])) != 255
         else:
             occ = disp_left <= 0.0
@@ -221,16 +233,19 @@ def main():
                 output_disp_normalized * delta * max_disp_levels + d_min_GT, min=d_min_GT, max=d_max_GT
             )
 
-            mask = disp_left > 0.0
+            if args.within_max_disp:
+                mask = torch.logical_and(disp_left > 0.0, disp_left < args.bi3dnet_max_disparity)
+            else:
+                mask = disp_left > 0.0
             error = F.l1_loss(output_disp[mask], disp_left[mask], reduction='none')
             wrong = torch.sum(error > args.threshold).item()
-            total = mask.numel()
+            total = error.numel()
 
             avg_error += torch.mean(error)
             avg_wrong += float(wrong)
             avg_total += float(total)
 
-            print('Index:', idx, 'EPE:', torch.mean(error).item(), 'px error', float(wrong) / float(total))
+            print('Index:', idx, 'EPE:', torch.mean(error).item(), 'px error', float(wrong) / float(total) * 100)
 
             # import matplotlib.pyplot as plt
             # plt.figure()
@@ -250,7 +265,7 @@ def main():
         #     os.path.join(out_dir, "%s_%s_%d_%d.png" % (base_name, args.arch, min_disparity, max_disparity)),
         #     disp_np_ours_color,
         # )
-    print('Total EPE', avg_error.item() / len(left_data), 'Total px error', float(avg_wrong) / float(avg_total))
+    print('Total EPE', avg_error.item() / len(left_data), 'Total px error', float(avg_wrong) / float(avg_total) * 100)
 
     return
 
